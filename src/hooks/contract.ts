@@ -12,6 +12,7 @@ const LIFECYCLE_HOOKS: ReadonlySet<HookName> = new Set([
   "file:edited",
   "agent:swap",
   "compaction",
+  "agent:initialize",
 ]);
 
 // Hooks whose intercepts are request-side — the chain has a response to

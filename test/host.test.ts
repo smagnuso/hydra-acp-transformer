@@ -15,15 +15,16 @@ function makeTempDir(): string {
 
 /** Write a config that exports a valid defineTransformer result.
  *
- * loadUserScript checks for __brand === "TransformerDefinition" on the
- * default export, so we inline that marker directly — no module resolution
- * needed from temp directories. */
+ * loadUserScript / isTransformerDefinition checks for the
+ * `__hydraAcpTransformer === "TransformerDefinition"` brand on the default
+ * export, so we inline that marker directly — no module resolution needed
+ * from temp directories. Kept in sync with lib.ts's BRAND_KEY / BRAND_VALUE. */
 function writeValidConfig(path: string, hookNames: string[]): void {
   const hooks = hookNames.map((name) => `    "${name}": async (event) => {}`).join(",\n");
   writeFileSync(
     path,
     `const __def = { hooks: {\n${hooks}\n} };
-Object.defineProperty(__def, "__brand", { value: "TransformerDefinition", writable: false });
+Object.defineProperty(__def, "__hydraAcpTransformer", { value: "TransformerDefinition", writable: false });
 export default __def;
 `,
     "utf8",
@@ -65,7 +66,7 @@ describe("loadUserScript", () => {
 
     writeFileSync(
       configPath,
-      `// No __brand — just a plain object.
+      `// No brand — just a plain object.
 export default { hooks: {}, invalid: true };
 `,
       "utf8",

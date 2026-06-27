@@ -14,7 +14,7 @@ import {
 } from "../src/hooks/filter.js";
 
 describe("HOOK_CATALOG", () => {
-  it("has exactly 24 distinct entries (alias shares one)", () => {
+  it("has exactly 25 entries (tool:permission aliases permission:pre)", () => {
     const keys = Object.keys(HOOK_CATALOG);
     assert.strictEqual(keys.length, 25); // 24 unique intercepts + tool:permission alias
   });

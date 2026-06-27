@@ -169,18 +169,16 @@ describe("defineTransformer", () => {
     }
   });
 
-  it("definition is opaque — no public constructor", () => {
+  it("definition is branded as non-enumerable", () => {
     const def = defineTransformer({ hooks: {} });
-    // The brand symbol is non-enumerable and not accessible via normal means.
-    // Users cannot construct this type themselves since they have no access
-    // to the internal symbol reference.
-    const descriptors = Object.getOwnPropertyDescriptors(def);
-    const brandKeys = Object.getOwnPropertySymbols(def);
-    assert.strictEqual(brandKeys.length, 1, "should have exactly one symbol property (the brand)");
-    assert.ok(
-      !("__brand" in def),
-      "brand should not be accessible by string key",
-    );
+    // Brand is a non-enumerable string-keyed property so it survives
+    // serialization but doesn't pollute Object.keys / spreads.
+    const desc = Object.getOwnPropertyDescriptor(def, "__hydraAcpTransformer");
+    assert.ok(desc, "should have the brand property");
+    assert.strictEqual(desc.value, "TransformerDefinition");
+    assert.strictEqual(desc.enumerable, false);
+    assert.strictEqual(desc.writable, false);
+    assert.strictEqual(Object.keys(def as object).indexOf("__hydraAcpTransformer"), -1);
   });
 });
 

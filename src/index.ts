@@ -9,7 +9,7 @@
 //      to --version, --help, or --validate.
 
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import jiti from "jiti";
 import { runHost } from "./host.js";
@@ -30,9 +30,10 @@ function readVersion(): string {
 }
 
 function validateScript(path: string): void {
-  const resolve = jiti(dirname(fileURLToPath(import.meta.url)), { interopDefault: true });
+  const load = jiti(dirname(fileURLToPath(import.meta.url)), { interopDefault: true });
+  const absPath = isAbsolute(path) ? path : resolve(process.cwd(), path);
   try {
-    const mod = resolve(path);
+    const mod = load(absPath);
     if (mod === null || mod === undefined) {
       log.error(`--validate: '${path}' loaded but has no exports`);
       process.exit(1);

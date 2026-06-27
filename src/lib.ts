@@ -82,10 +82,24 @@ export interface TransformerSpec {
 
 // ── Opaque definition ──────────────────────────────────────────────────────
 
-const __brand = Symbol("TransformerDefinition");
+// String-keyed brand (not a Symbol) so it survives serialization /
+// cross-module-instance loads — the host binary may import a different
+// copy of @hydra-acp/transformer than the user's config script.
+const BRAND_KEY = "__hydraAcpTransformer";
+const BRAND_VALUE = "TransformerDefinition";
 
 interface TransformerDefinition {
-  readonly [__brand]: "TransformerDefinition";
+  readonly [BRAND_KEY]: typeof BRAND_VALUE;
+}
+
+/** True if `value` is a TransformerDefinition produced by defineTransformer. */
+export function isTransformerDefinition(value: unknown): value is TransformerDefinition {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    BRAND_KEY in value &&
+    (value as Record<string, unknown>)[BRAND_KEY] === BRAND_VALUE
+  );
 }
 
 /**
@@ -111,8 +125,8 @@ export function defineTransformer(
   }
 
   const wrapped = spec as unknown as TransformerDefinition;
-  Object.defineProperty(wrapped, __brand, {
-    value: "TransformerDefinition" as const,
+  Object.defineProperty(wrapped, BRAND_KEY, {
+    value: BRAND_VALUE,
     writable: false,
     enumerable: false,
     configurable: false,

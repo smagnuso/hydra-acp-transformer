@@ -1,6 +1,6 @@
 import { createJiti } from "jiti";
 import { existsSync } from "node:fs";
-import type { Context, SetupContext } from "./lib.js";
+import { isTransformerDefinition, type Context, type SetupContext } from "./lib.js";
 import { TransformerBridge } from "./bridge.js";
 import { loadHostConfig } from "./config.js";
 import { logger, setDebug } from "./util/log.js";
@@ -21,19 +21,21 @@ export async function loadUserScript(
   path: string,
 ): Promise<UserDefinition | undefined> {
   const jiti = createJiti(import.meta.url, { interopDefault: true });
+  return loadWith(jiti, path);
+}
 
+async function loadWith(
+  jiti: ReturnType<typeof createJiti>,
+  path: string,
+): Promise<UserDefinition | undefined> {
   if (!existsSync(path)) {
     log.warn(`config file not found at ${path}, idling`);
     return undefined;
   }
   try {
     const mod = await jiti.import<Record<string, unknown>>(path);
-    const raw = mod.default as Record<string, unknown> | undefined;
-    if (
-      !raw ||
-      typeof raw !== "object" ||
-      !("__brand" in raw && raw.__brand === "TransformerDefinition")
-    ) {
+    const raw = mod.default;
+    if (!isTransformerDefinition(raw)) {
       log.error(`transformer config at ${path} does not export a valid defineTransformer result`);
       return undefined;
     }
@@ -50,30 +52,7 @@ export async function runHost(): Promise<void> {
 
   const jiti = createJiti(import.meta.url, { interopDefault: true });
 
-  async function loadUserScriptFromDisk(
-    path: string,
-  ): Promise<UserDefinition | undefined> {
-    if (!existsSync(path)) {
-      log.warn(`config file not found at ${path}, idling`);
-      return undefined;
-    }
-    try {
-      const mod = await jiti.import<Record<string, unknown>>(path);
-      const raw = mod.default as Record<string, unknown> | undefined;
-      if (
-        !raw ||
-        typeof raw !== "object" ||
-        !("__brand" in raw && raw.__brand === "TransformerDefinition")
-      ) {
-        log.error(`transformer config at ${path} does not export a valid defineTransformer result`);
-        return undefined;
-      }
-      return raw as unknown as UserDefinition;
-    } catch (err) {
-      log.error(`failed to load transformer config: ${(err as Error).message}`);
-      return undefined;
-    }
-  }
+  const loadUserScriptFromDisk = (path: string) => loadWith(jiti, path);
 
   function bustJitiCache(path: string): void {
     delete (jiti as unknown as { cache: Record<string, unknown> }).cache[path];

@@ -183,6 +183,7 @@ export class TransformerBridge extends EventEmitter {
 
     this.client.on("close", ({ hadError }) => {
       log.info(`WS closed (hadError=${hadError})`);
+      this.clearKeepAliveTimers();
       this.abortAllSessions();
       this.emit("disconnected", { hadError });
     });
@@ -208,15 +209,19 @@ export class TransformerBridge extends EventEmitter {
     });
   }
 
+  private clearKeepAliveTimers(): void {
+    for (const timer of this.keepAliveTimers.values()) {
+      clearInterval(timer);
+    }
+    this.keepAliveTimers.clear();
+  }
+
   start(): void {
     this.client.start();
   }
 
   stop(): void {
-    for (const timer of this.keepAliveTimers.values()) {
-      clearInterval(timer);
-    }
-    this.keepAliveTimers.clear();
+    this.clearKeepAliveTimers();
     this.abortAllSessions();
     this.client.stop();
   }
@@ -575,9 +580,10 @@ export class TransformerBridge extends EventEmitter {
   /**
    * Execute a hook handler and manage processing claims for slow async hooks.
    *
-   * If the handler returns a Promise that takes longer than 100ms to resolve,
-   * sends "processing" to park the claim and starts keep-alive pings every
-   * TRANSFORMER_CLAIM_TIMEOUT_MS / 2 until resolution.
+   * If the handler returns a Promise that takes longer than
+   * EARLY_RESOLVE_THRESHOLD_MS to resolve, sends "processing" to park the
+   * claim and starts keep-alive pings every claimTimeoutMs / 2 until
+   * resolution.
    */
   private async runHookWithClaim(
     ctx: Context,
