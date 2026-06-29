@@ -1,18 +1,31 @@
 {
   "name": "@hydra-acp/transformer",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "JS-injected hooks for hydra-acp — drop a .config.js file or build a custom transformer with the SDK.",
   "license": "MIT",
   "type": "module",
-  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
-  "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "main": "dist/lib.js",
   "bin": {
     "hydra-acp-transformer": "dist/index.js"
   },
   "exports": {
-    ".":         { "import": "./dist/lib.js", "types": "./dist/lib.d.ts" },
-    "./types":   { "import": "./dist/types.js", "types": "./dist/types.d.ts" }
+    ".": {
+      "import": "./dist/lib.js",
+      "types": "./dist/lib.d.ts"
+    },
+    "./types": {
+      "import": "./dist/types.js",
+      "types": "./dist/types.d.ts"
+    }
   },
   "scripts": {
     "build": "npm run lint && tsup",
@@ -27,7 +40,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ws":   "^8.20.0",
+    "ws": "^8.20.0",
     "jiti": "^2.4.0"
   },
   "devDependencies": {
