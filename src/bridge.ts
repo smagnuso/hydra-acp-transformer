@@ -8,7 +8,7 @@ import type {
 import { logger } from "./util/log.js";
 import { HOOK_CATALOG, type HookName } from "./hooks/catalog.js";
 import { encodeHookReturn } from "./hooks/contract.js";
-import type { Context, SetupContext } from "./types.js";
+import type { CommandHandler, CommandInvocation, CommandResult, CommandSpec, Context, SetupContext } from "./types.js";
 
 const log = logger("bridge");
 
@@ -41,12 +41,15 @@ export interface BridgeClient {
 
 interface BridgeOptions {
   daemonWsUrl: string;
+  httpUrl: string;
   token: string;
   clientName: string;
   definition: TransformerSpec;
   claimTimeoutMs?: number;
   /** Test seam: when provided, the bridge uses this instead of creating a real client. */
   client?: BridgeClient;
+  /** Test seam: when provided, the bridge uses this for ctx.fetch instead of globalThis.fetch. */
+  fetchFn?: typeof globalThis.fetch;
 }
 
 /** User-facing transformer spec — mirrors lib.ts to avoid circular imports. */
@@ -85,7 +88,14 @@ interface SessionEntry {
 /** Build a per-session Context from a sessionId. */
 function createContext(
   sessionId: string,
-  options: { logger: import("./util/log.js").Logger },
+  options: {
+    logger: import("./util/log.js").Logger;
+    rpc?: (method: string, params?: unknown) => Promise<unknown>;
+    registerCommand?: (spec: CommandSpec, handler: CommandHandler) => void;
+    httpUrl?: string;
+    token?: string;
+    fetchFn?: typeof globalThis.fetch;
+  },
 ): SessionEntry {
   const ac = new AbortController();
   return {
@@ -99,6 +109,39 @@ function createContext(
       },
       state: new Map(),
       signal: ac.signal,
+      rpc(method, params) {
+        return options.rpc?.(method, params) ?? Promise.resolve(undefined);
+      },
+      registerCommand(spec, handler) {
+        options.registerCommand?.(spec, handler);
+      },
+      emitMessage(text: string) {
+        // Fire-and-forget: emit an assistant-visible message into the
+        // current session using hydra-acp/message/emit with route "daemon".
+        // Errors are suppressed — callers should also surface critical info
+        // via the command return value.
+        options.rpc?.("hydra-acp/message/emit", {
+          sessionId,
+          method: "session/prompt",
+          envelope: {
+            sessionId,
+            prompt: [{ type: "text", text }],
+          },
+          route: "daemon",
+        }).catch(() => void 0);
+        return Promise.resolve();
+      },
+      async fetch(pathOrUrl, init) {
+        const base = options.httpUrl;
+        const url = base && pathOrUrl.startsWith("/")
+          ? `${base.replace(/\/$/, "")}${pathOrUrl}`
+          : pathOrUrl;
+        const headers = new Headers(init?.headers);
+        if (!headers.has("Authorization") && base) {
+          headers.set("Authorization", `Bearer ${options.token ?? ""}`);
+        }
+        return (options.fetchFn ?? globalThis.fetch)(url, { ...init, headers });
+      },
     },
   };
 }
@@ -128,6 +171,10 @@ export class TransformerBridge extends EventEmitter {
 
   // Active keep-alive intervals keyed by sessionId (for async claim management).
   private readonly keepAliveTimers = new Map<string, ReturnType<typeof setInterval>>();
+
+  // Registered slash commands: verb → { spec, handler }. Populated via
+  // ctx.registerCommand() from setup or any hook. Re-sent on every WS open.
+  private registeredCommands = new Map<string, { spec: CommandSpec; handler: CommandHandler }>();
 
   constructor(private readonly opts: BridgeOptions) {
     super();
@@ -179,6 +226,7 @@ export class TransformerBridge extends EventEmitter {
     this.client.on("open", () => {
       log.info("WS connected, handshake complete");
       void this.handleOpen(setupFn);
+      void this.registerCommands();
     });
 
     this.client.on("close", ({ hadError }) => {
@@ -290,6 +338,7 @@ export class TransformerBridge extends EventEmitter {
     this.client.on("open", () => {
       log.info("WS connected, handshake complete");
       void this.handleOpen(newDef.setup);
+      void this.registerCommands();
     });
     this.client.on("close", ({ hadError }) => {
       log.info(`WS closed (hadError=${hadError})`);
@@ -324,22 +373,52 @@ export class TransformerBridge extends EventEmitter {
   private async handleOpen(setupFn?: (ctx: SetupContext) => void | Promise<void>): Promise<void> {
     if (!setupFn) return;
 
+    const bridge = this;
     const ctx: SetupContext = {
-      sessionId: undefined,
-      cwd: undefined,
-      logger: log,
-      notify(level, message) {
-        log[level](message);
-      },
-      state: new Map(),
-      signal: new AbortController().signal,
-    };
+       sessionId: undefined,
+       cwd: undefined,
+       logger: log,
+       notify(level, message) {
+         log[level](message);
+       },
+       state: new Map(),
+       signal: new AbortController().signal,
+       rpc(method, params) {
+         return bridge.rpc(method, params);
+       },
+       registerCommand(spec, handler) {
+         bridge.registerCommand(spec, handler);
+       },
+       emitMessage(_text: string) {
+         // No session during setup — no-op.
+         return Promise.resolve();
+       },
+       async fetch(pathOrUrl, init) {
+         const url = pathOrUrl.startsWith("/") ? `${bridge.opts.httpUrl.replace(/\/$/, "")}${pathOrUrl}` : pathOrUrl;
+         const headers = new Headers(init?.headers);
+         if (!headers.has("Authorization")) {
+           headers.set("Authorization", `Bearer ${bridge.opts.token}`);
+         }
+         return (bridge.opts.fetchFn ?? globalThis.fetch)(url, { ...init, headers });
+       },
+     };
 
     try {
       await setupFn(ctx);
       log.debug("setup callback completed");
     } catch (err) {
       log.error("setup callback threw:", (err as Error).message);
+    }
+  }
+
+  private async registerCommands(): Promise<void> {
+    if (this.registeredCommands.size === 0) return;
+    try {
+      const specs = [...this.registeredCommands.values()].map((v) => v.spec);
+      await this.client.request("hydra-acp/commands/register", { commands: specs });
+      log.info(`registered ${specs.length} slash command(s): ${specs.map((s) => s.verb).join(", ")}`);
+    } catch (err) {
+      log.error(`commands/register failed: ${(err as Error).message}`);
     }
   }
 
@@ -362,6 +441,10 @@ export class TransformerBridge extends EventEmitter {
   // ── Incoming message dispatch ─────────────────────────────────────────
 
   private handleRequest(req: JsonRpcRequest): void {
+    if (req.method === "hydra-acp/commands/invoke") {
+      this.handleCommandsInvoke(req);
+      return;
+    }
     if (req.method !== "hydra-acp/transformer/message") return;
 
     const params = req.params as Record<string, unknown> | undefined;
@@ -450,6 +533,47 @@ export class TransformerBridge extends EventEmitter {
         await handler(payload, ctx);
       } catch (err) {
         log.error(`lifecycle hook "${hookName}" threw:`, (err as Error).message);
+      }
+    })();
+  }
+
+  // ── Slash-command dispatch ──────────────────────────────────────────
+
+  private handleCommandsInvoke(req: JsonRpcRequest): void {
+    const params = (req.params ?? {}) as {
+      sessionId?: string;
+      verb?: string;
+      args?: string;
+      messageId?: string;
+    };
+    const sessionId = params.sessionId ?? "";
+    const verb = params.verb ?? "";
+    const args = (params.args ?? "").trim();
+    const messageId = params.messageId;
+
+    const entry = this.registeredCommands.get(verb);
+    if (!entry) {
+      log.warn(`no command registered for verb "${verb}"`);
+      this.client.reply(req.id, { text: `unknown command: ${verb}` });
+      return;
+    }
+
+    const argv = args.length > 0 ? args.split(/\s+/) : [];
+    const inv: CommandInvocation = { verb, argv, sessionId, messageId };
+
+    void (async () => {
+      const ctx = this.getOrCreateSession(sessionId);
+      try {
+        const result = await entry.handler(inv, ctx);
+        if (result.message) {
+          this.client.reply(req.id, { text: result.message });
+        } else {
+          this.client.reply(req.id, {});
+        }
+      } catch (err) {
+        const msg = (err as Error).message;
+        log.error(`command handler "${verb}" threw:`, msg);
+        this.client.reply(req.id, { text: `Error: ${msg}` });
       }
     })();
   }
@@ -680,12 +804,26 @@ export class TransformerBridge extends EventEmitter {
     return timer;
   }
 
-  // ── Session management ────────────────────────────────────────────────
+  // ── Context extensions (rpc + registerCommand) ────────────────────────
+
+ /** Generic RPC: thin wrapper over client.request(). */
+ private rpc(method: string, params?: unknown): Promise<unknown> {
+   return this.client.request(method, params);
+ }
+
+ /** Register a slash command. Stores spec+handler in the bridge's Map keyed
+  *  by verb. On WS open (initial and after SIGHUP), all stored specs are
+  *  re-sent via hydra-acp/commands/register. */
+ private registerCommand(spec: CommandSpec, handler: CommandHandler): void {
+   this.registeredCommands.set(spec.verb, { spec, handler });
+ }
+
+ // ── Session management ────────────────────────────────────────────────
 
   private getOrCreateSession(sessionId: string): Context {
     let entry = this.sessions.get(sessionId);
     if (!entry) {
-      entry = createContext(sessionId, { logger: log });
+      entry = createContext(sessionId, { logger: log, rpc: this.rpc.bind(this), registerCommand: this.registerCommand.bind(this), httpUrl: this.opts.httpUrl, token: this.opts.token, fetchFn: this.opts.fetchFn });
       this.sessions.set(sessionId, entry);
     }
     return entry.ctx;
@@ -703,7 +841,7 @@ export class TransformerBridge extends EventEmitter {
  *   - HYDRA_ACP_TOKEN   — auth token
  *   - HYDRA_ACP_TRANSFORMER_NAME — identifies this transformer to the daemon
  */
-export async function runTransformer(definition: TransformerSpec): Promise<void> {
+export async function runTransformer(definition: TransformerSpec | { setup?: TransformerSpec["setup"]; hooks: Record<string, unknown> }): Promise<void> {
   const wsUrl = process.env.HYDRA_ACP_WS_URL;
   const token = process.env.HYDRA_ACP_TOKEN;
   const clientName = process.env.HYDRA_ACP_TRANSFORMER_NAME ?? "transformer";
@@ -711,11 +849,24 @@ export async function runTransformer(definition: TransformerSpec): Promise<void>
   if (!wsUrl) throw new Error("HYDRA_ACP_WS_URL is not set");
   if (!token) throw new Error("HYDRA_ACP_TOKEN is not set");
 
+  // Derive the HTTP base URL from the WebSocket URL.
+  // ws(s)://host/path → http(s)://host
+  const httpUrl = (() => {
+    let derived = wsUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+    // Strip everything from the first "/" onward (host + path).
+    const slashIdx = derived.indexOf("/");
+    if (slashIdx !== -1) {
+      derived = derived.slice(0, slashIdx);
+    }
+    return derived;
+  })();
+
   const bridge = new TransformerBridge({
     daemonWsUrl: wsUrl,
+    httpUrl,
     token,
     clientName,
-    definition,
+    definition: definition as TransformerSpec,
   });
 
   bridge.start();

@@ -214,6 +214,38 @@ export interface AgentCapabilities {
   [key: string]: unknown; // open — agent-defined
 }
 
+// ── Slash-command shapes (hydra-acp/commands/register + invoke) ──────
+
+/** Specification for a slash command registered via ctx.registerCommand(). */
+export interface CommandSpec {
+  verb: string;
+  description: string;
+  argsHint?: string;
+}
+
+/** Invocation delivered to a command handler when the daemon dispatches
+ *  hydra-acp/commands/invoke. Mirrors the wire shape from PROTOCOL.md. */
+export interface CommandInvocation {
+  verb: string;
+  argv: string[];
+  sessionId: string;
+  messageId?: string;
+}
+
+/** Result returned by a command handler. The bridge encodes this as the
+ *  commands/invoke reply — { text } for non-empty messages, {} for silent. */
+export interface CommandResult {
+  ok: boolean;
+  message?: string;
+}
+
+/** Handler function for a registered slash command. Receives the parsed
+ *  invocation and a per-session Context. */
+export type CommandHandler = (
+  inv: CommandInvocation,
+  ctx: Context,
+) => Promise<CommandResult>;
+
 // ── Context interfaces ────────────────────────────────────────────────
 
 /** Per-hook invocation context. Passed as the second argument to every
@@ -225,7 +257,26 @@ export interface Context {
   notify(level: "info" | "warn" | "error", message: string): void;
   state: Map<string, unknown>;
   signal: AbortSignal;
-}
+ /** Send a generic RPC request to the daemon and await its response.
+    *  Thin wrapper over the internal client.request() that preserves
+    *  session context via _meta.hydra-acp.sessionId. */
+   rpc(method: string, params?: unknown): Promise<unknown>;
+   /** Register a slash command with the daemon. The spec is advertised
+    *  on WS open (initial connect and after SIGHUP reload). Invocations
+    *  arrive as hydra-acp/commands/invoke requests and are dispatched
+    *  to this handler. Safe to call from setup or any hook. */
+   registerCommand(spec: CommandSpec, handler: CommandHandler): void;
+  /** Emit an assistant-visible message into the current session.
+    *  Uses `hydra-acp/message/emit` with route "daemon" under the hood.
+    *  Errors are suppressed — this is fire-and-forget; callers should
+    *  also surface critical info via the command return value. */
+   emitMessage(text: string): Promise<void>;
+   /** Fetch against the hydra daemon. If pathOrUrl starts with "/" the
+    *  daemon base URL is prepended. The Authorization: Bearer <token>
+    *  header is injected unless the caller sets one in init.headers.
+    *  Non-2xx responses are NOT thrown — caller decides. */
+   fetch(pathOrUrl: string, init?: RequestInit): Promise<Response>;
+ }
 
 /** Context available during setup (before any session is known). */
 export interface SetupContext extends Omit<Context, "sessionId" | "cwd"> {

@@ -131,8 +131,64 @@ Every hook handler receives a `ctx` as its second argument:
 | `ctx.notify(level, message)` | Surface a notification to attached clients (UI, Slack, TUI) |
 | `ctx.state` | Per-session `Map<string, unknown>` that survives across hook invocations but not daemon restarts — use it to carry state between calls |
 | `ctx.signal` | An `AbortSignal` that fires when the session closes or the daemon shuts down the transformer — use it to cancel in-flight work |
+| `ctx.rpc(method, params?)` | Send a generic RPC request to the daemon and await its response. Thin wrapper over the internal client. |
+| `ctx.registerCommand(spec, handler)` | Register a slash command (`/hydra <transformer-name> <verb>`). The spec is advertised on WS open; invocations are routed to the handler. Safe to call from setup or any hook — multiple calls with the same verb overwrite. |
+| `ctx.emitMessage(text)` | Emit an assistant-visible message into the current session using `hydra-acp/message/emit` with route "daemon". Errors are suppressed (fire-and-forget); callers should also surface critical info via the command return value. |
+| `ctx.fetch(pathOrUrl, init?)` | HTTP fetch against the hydra daemon. If pathOrUrl starts with "/" the daemon base URL is prepended. The Authorization: Bearer <token> header is injected unless the caller sets one in init.headers. Non-2xx responses are NOT thrown — caller decides. |
 
 The `setup` callback (see below) receives a `SetupContext` instead — same fields except `sessionId` and `cwd` are `undefined` since setup runs before any session is known.
+
+## Slash commands and RPC
+
+Register slash commands in your transformer's `setup` callback or from any hook handler. The daemon forwards `/hydra <transformer-name> <verb> …` invocations to your handler with the parsed arguments:
+
+```ts
+import { defineTransformer } from "@hydra-acp/transformer";
+
+export default defineTransformer({
+  setup(ctx) {
+    ctx.registerCommand(
+      { verb: "hello", description: "say hi", argsHint: "[name]" },
+      async (inv, ctx) => {
+        const name = inv.argv[0] ?? "world";
+        return { ok: true, message: `Hello, ${name}!` };
+      },
+    );
+  },
+
+  hooks: {
+    "session:open": async (_event, ctx) => {
+      // Use rpc() to call any daemon method
+      const agents = await ctx.rpc("hydra-acp/agents/list", {});
+      ctx.logger.info(`available agents: ${JSON.stringify(agents)}`);
+    },
+  },
+});
+```
+
+Users invoke registered commands as `/hydra <transformer-name> hello Alice`. The handler receives `{ verb: "hello", argv: ["Alice"], sessionId: "..." }` and returns `{ ok: true, message: "Hello, Alice!" }`, which the daemon surfaces as a synthetic agent_message_chunk in the conversation.
+
+## Daemon HTTP
+
+`ctx.fetch` provides an HTTP client that talks directly to the hydra daemon. It resolves relative paths (those starting with "/") against the daemon's HTTP base URL (`HYDRA_ACP_DAEMON_URL`) and injects the bearer token automatically:
+
+```ts
+import { defineTransformer } from "@hydra-acp/transformer";
+
+export default defineTransformer({
+  hooks: {
+    "session:open": async (_event, ctx) => {
+      const res = await ctx.fetch(`/v1/sessions/${ctx.sessionId}/diff?fold=true`);
+      if (res.ok) {
+        const files = await res.json();
+        // files is an array of { path, hunks, created }
+      }
+    },
+  },
+});
+```
+
+Absolute URLs pass through unchanged. Callers may supply their own Authorization header in `init.headers` to override the injected bearer token.
 
 ## Config
 

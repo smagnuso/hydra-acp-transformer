@@ -62,6 +62,7 @@ export async function runHost(): Promise<void> {
     const definition = def ?? { hooks: {} };
     return new TransformerBridge({
       daemonWsUrl: config.hydraWsUrl,
+      httpUrl: config.hydraDaemonUrl,
       token: config.hydraToken,
       clientName: process.env.HYDRA_ACP_TRANSFORMER_NAME ?? "transformer",
       definition,

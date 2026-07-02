@@ -453,4 +453,486 @@ describe("TransformerBridge - protocol fidelity", () => {
       assert.equal(storedSignal!.aborted, true);
     });
   });
+
+  describe("ctx.rpc", () => {
+    it("rpc() delegates to client.request and returns the result", async () => {
+      const fake = new FakeTransformerClient();
+      let rpcCalled = false;
+      let rpcMethod = "";
+      let rpcParams: unknown;
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: { hooks: { "session:open": async (_event, ctx) => { rpcCalled = true; rpcMethod = "hydra-acp/agents/list"; rpcParams = ctx.state.get("_rpcParams"); const result = await ctx.rpc("hydra-acp/agents/list", {}); return result; } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.opened", sessionId: "rpc-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(rpcCalled, true);
+      const requestCall = fake.requests.find((r) => r.method === "hydra-acp/agents/list");
+      assert.ok(requestCall, "rpc should call client.request");
+    });
+  });
+
+  describe("ctx.registerCommand", () => {
+    it("fires commands/register on WS open after setup registers a command", async () => {
+      const fake = new FakeTransformerClient();
+      let setupCtx: import("../src/types.js").SetupContext | undefined;
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          setup(ctx) {
+            setupCtx = ctx;
+            ctx.registerCommand(
+              { verb: "ping", description: "ping the transformer" },
+              async () => ({ ok: true, message: "pong" }),
+            );
+          },
+          hooks: {},
+        },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+      const regCall = fake.requests.find((r) => r.method === "hydra-acp/commands/register");
+      assert.ok(regCall, "commands/register should be sent on WS open");
+      const params = regCall!.params as { commands?: Array<{ verb: string; description: string }> };
+      assert.ok(params.commands);
+      assert.equal(params.commands.length, 1);
+      assert.equal(params.commands[0]!.verb, "ping");
+    });
+
+    it("commands/register wire params carry argsHint from spec", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          setup(ctx) {
+            ctx.registerCommand(
+              { verb: "hinted", description: "with arg hint", argsHint: "[target]" },
+              async () => ({ ok: true }),
+            );
+          },
+          hooks: {},
+        },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+
+      const regCall = fake.requests.find((r) => r.method === "hydra-acp/commands/register");
+      assert.ok(regCall);
+      const params = regCall!.params as { commands?: Array<{ verb: string; argsHint?: string }> };
+      assert.equal(params.commands?.[0]?.verb, "hinted");
+      assert.equal(params.commands?.[0]?.argsHint, "[target]");
+    });
+
+    it("invoke dispatches to the registered handler", async () => {
+      const fake = new FakeTransformerClient();
+      let invokVerb = "";
+      let invokArgv: string[] = [];
+      let invokSessionId = "";
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          setup(ctx) {
+            ctx.registerCommand(
+              { verb: "greet", description: "say hello" },
+              async (inv, _ctx) => {
+                invokVerb = inv.verb;
+                invokArgv = inv.argv;
+                invokSessionId = inv.sessionId;
+                return { ok: true, message: `Hello, ${inv.argv[0] ?? "world"}!` };
+              },
+            );
+          },
+          hooks: {},
+        },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+
+      emitRequest(fake, bridge, {
+        jsonrpc: "2.0", id: 100, method: "hydra-acp/commands/invoke",
+        params: { sessionId: "cmd-sess-1", verb: "greet", args: "Alice" },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      assert.equal(invokVerb, "greet");
+      assert.deepEqual(invokArgv, ["Alice"]);
+      assert.equal(invokSessionId, "cmd-sess-1");
+
+      const reply = fake.replies.find((r) => r.id === 100);
+      assert.ok(reply);
+      assert.deepEqual(reply.result, { text: "Hello, Alice!" });
+    });
+
+    it("handler exception returns error text", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          setup(ctx) {
+            ctx.registerCommand(
+              { verb: "boom", description: "will fail" },
+              async () => { throw new Error("kaboom"); },
+            );
+          },
+          hooks: {},
+        },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+
+      emitRequest(fake, bridge, {
+        jsonrpc: "2.0", id: 101, method: "hydra-acp/commands/invoke",
+        params: { sessionId: "cmd-sess-2", verb: "boom", args: "" },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const reply = fake.replies.find((r) => r.id === 101);
+      assert.ok(reply);
+      assert.ok((reply.result as { text?: string })?.text?.includes("Error: kaboom"));
+    });
+
+    it("unknown verb returns error text", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: { hooks: {}, setup: undefined },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+
+      emitRequest(fake, bridge, {
+        jsonrpc: "2.0", id: 102, method: "hydra-acp/commands/invoke",
+        params: { sessionId: "cmd-sess-3", verb: "unknown", args: "" },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const reply = fake.replies.find((r) => r.id === 102);
+      assert.ok(reply);
+      assert.equal((reply.result as { text?: string })?.text, "unknown command: unknown");
+    });
+
+    it("SIGHUP (replaceDefinition) re-registers commands on new open", async () => {
+      const fake = new FakeTransformerClient();
+      let setupCtx: import("../src/types.js").SetupContext | undefined;
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          setup(ctx) {
+            setupCtx = ctx;
+            ctx.registerCommand(
+              { verb: "reload-test", description: "verify re-registration" },
+              async () => ({ ok: true, message: "reloaded" }),
+            );
+          },
+          hooks: {},
+        },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+
+      // Snapshot: count registrations before SIGHUP.
+      const beforeCount = fake.requests.filter((r) => r.method === "hydra-acp/commands/register").length;
+      assert.equal(beforeCount, 1, "should have one registration after initial connect");
+
+      // Simulate SIGHUP: replaceDefinition stops the client and re-wires.
+      bridge.replaceDefinition({ hooks: { "session:open": async () => undefined } });
+      await new Promise((r) => setTimeout(r, 30));
+
+      // After SIGHUP there should be at least one more registration.
+      const afterCount = fake.requests.filter((r) => r.method === "hydra-acp/commands/register").length;
+      assert.ok(afterCount > beforeCount, "should re-register commands after SIGHUP (had " + beforeCount + ", now " + afterCount + ")");
+    });
+
+    it("multiple commands are all registered", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          setup(ctx) {
+            ctx.registerCommand(
+              { verb: "alpha", description: "first command" },
+              async () => ({ ok: true }),
+            );
+            ctx.registerCommand(
+              { verb: "beta", description: "second command" },
+              async () => ({ ok: true }),
+            );
+          },
+          hooks: {},
+        },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+
+      const regCall = fake.requests.find((r) => r.method === "hydra-acp/commands/register");
+      assert.ok(regCall);
+      const params = regCall!.params as { commands?: Array<{ verb: string }> };
+      assert.equal(params.commands?.length, 2);
+      const verbs = params.commands!.map((c) => c.verb).sort();
+      assert.deepEqual(verbs, ["alpha", "beta"]);
+    });
+
+    it("invoke with empty args passes empty argv", async () => {
+      const fake = new FakeTransformerClient();
+      let invokArgv: string[] = [];
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          setup(ctx) {
+            ctx.registerCommand(
+              { verb: "empty-args", description: "test empty args" },
+              async (inv) => { invokArgv = inv.argv; return { ok: true }; },
+            );
+          },
+          hooks: {},
+        },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+
+      emitRequest(fake, bridge, {
+        jsonrpc: "2.0", id: 103, method: "hydra-acp/commands/invoke",
+        params: { sessionId: "cmd-sess-4", verb: "empty-args", args: "" },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      assert.deepEqual(invokArgv, []);
+    });
+
+    it("handler returns no message → empty reply", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          setup(ctx) {
+            ctx.registerCommand(
+              { verb: "silent", description: "no reply" },
+              async () => ({ ok: true }),
+            );
+          },
+          hooks: {},
+        },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+
+      emitRequest(fake, bridge, {
+        jsonrpc: "2.0", id: 104, method: "hydra-acp/commands/invoke",
+        params: { sessionId: "cmd-sess-5", verb: "silent", args: "" },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const reply = fake.replies.find((r) => r.id === 104);
+      assert.ok(reply);
+     assert.deepEqual(reply.result, {});
+    });
+  });
+
+  describe("ctx.fetch", () => {
+    it("prepends daemon base URL when path starts with /", async () => {
+      let actualUrl = "";
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer", httpUrl: "http://daemon.local:9999", fetchFn: async (url, init) => { actualUrl = url; return new Response(JSON.stringify({ ok: true })); },
+        definition: { hooks: { "session:open": async (_event, ctx) => { await ctx.fetch("/v1/sessions/s1/diff"); } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, { jsonrpc: "2.0", method: "hydra-acp/transformer/session_event", params: { event: "session.opened", sessionId: "fetch-sess-1", payload: {} } });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(actualUrl, "http://daemon.local:9999/v1/sessions/s1/diff");
+    });
+
+    it("passes absolute URL through unchanged", async () => {
+      let actualUrl = "";
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer", httpUrl: "http://daemon.local:9999", fetchFn: async (url, init) => { actualUrl = url; return new Response(JSON.stringify({ ok: true })); },
+        definition: { hooks: { "session:open": async (_event, ctx) => { await ctx.fetch("http://other.host/path"); } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, { jsonrpc: "2.0", method: "hydra-acp/transformer/session_event", params: { event: "session.opened", sessionId: "fetch-sess-2", payload: {} } });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(actualUrl, "http://other.host/path");
+    });
+
+    it("does not double trailing slash on base URL", async () => {
+      let actualUrl = "";
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer", httpUrl: "http://daemon.local:9999/", fetchFn: async (url, init) => { actualUrl = url; return new Response(JSON.stringify({ ok: true })); },
+        definition: { hooks: { "session:open": async (_event, ctx) => { await ctx.fetch("/api/data"); } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, { jsonrpc: "2.0", method: "hydra-acp/transformer/session_event", params: { event: "session.opened", sessionId: "fetch-sess-3", payload: {} } });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(actualUrl, "http://daemon.local:9999/api/data");
+    });
+
+    it("injects Authorization header when caller does not provide one", async () => {
+      let actualHeaders: Headers | undefined;
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "my-secret", clientName: "test-transformer", httpUrl: "http://daemon.local:9999", fetchFn: async (url, init) => { actualHeaders = init?.headers; return new Response(JSON.stringify({ ok: true })); },
+        definition: { hooks: { "session:open": async (_event, ctx) => { await ctx.fetch("/v1/test"); } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, { jsonrpc: "2.0", method: "hydra-acp/transformer/session_event", params: { event: "session.opened", sessionId: "fetch-sess-4", payload: {} } });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.ok(actualHeaders);
+      assert.equal(actualHeaders!.get("Authorization"), "Bearer my-secret");
+    });
+
+    it("does not overwrite Authorization header when caller provides one", async () => {
+      let actualHeaders: Headers | undefined;
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "my-secret", clientName: "test-transformer", httpUrl: "http://daemon.local:9999", fetchFn: async (url, init) => { actualHeaders = init?.headers; return new Response(JSON.stringify({ ok: true })); },
+        definition: { hooks: { "session:open": async (_event, ctx) => { await ctx.fetch("/v1/test", { headers: { Authorization: "Custom abc" } }); } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, { jsonrpc: "2.0", method: "hydra-acp/transformer/session_event", params: { event: "session.opened", sessionId: "fetch-sess-5", payload: {} } });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.ok(actualHeaders);
+      assert.equal(actualHeaders!.get("Authorization"), "Custom abc");
+    });
+
+    it("passes init.method and init.body through to fetch", async () => {
+      let actualMethod = "";
+      let actualBody: string | undefined;
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer", httpUrl: "http://daemon.local:9999", fetchFn: async (url, init) => { actualMethod = init?.method ?? ""; actualBody = init?.body as string | undefined; return new Response(JSON.stringify({ ok: true })); },
+        definition: { hooks: { "session:open": async (_event, ctx) => { await ctx.fetch("/v1/test", { method: "POST", body: JSON.stringify({ key: "val" }) }); } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, { jsonrpc: "2.0", method: "hydra-acp/transformer/session_event", params: { event: "session.opened", sessionId: "fetch-sess-6", payload: {} } });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(actualMethod, "POST");
+      assert.equal(actualBody, '{"key":"val"}');
+    });
+
+    it("non-2xx does NOT throw — returns the Response", async () => {
+      let actualStatus = 0;
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer", httpUrl: "http://daemon.local:9999", fetchFn: async () => { return new Response("not found", { status: 404 }); },
+        definition: { hooks: { "session:open": async (_event, ctx) => { const res = await ctx.fetch("/v1/missing"); actualStatus = res.status; } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, { jsonrpc: "2.0", method: "hydra-acp/transformer/session_event", params: { event: "session.opened", sessionId: "fetch-sess-7", payload: {} } });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(actualStatus, 404);
+    });
+
+    it("network error propagates to the caller", async () => {
+      let caughtError = false;
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer", httpUrl: "http://daemon.local:9999", fetchFn: async () => { throw new Error("ENOTFOUND"); },
+        definition: { hooks: { "session:open": async (_event, ctx) => { try { await ctx.fetch("/v1/test"); } catch (e) { caughtError = true; } } } },
+        client: fake,
+      });
+      emitNotification(fake, bridge, { jsonrpc: "2.0", method: "hydra-acp/transformer/session_event", params: { event: "session.opened", sessionId: "fetch-sess-8", payload: {} } });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(caughtError, true);
+    });
+
+    it("setup context fetch uses httpUrl and injects auth", async () => {
+      let actualUrl = "";
+      let actualAuth = "";
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "setup-token", clientName: "test-transformer", httpUrl: "http://daemon.local:8080", fetchFn: async (url, init) => { actualUrl = url; actualAuth = init?.headers?.get("Authorization") ?? ""; return new Response(JSON.stringify({ ok: true })); },
+        definition: { setup(ctx) { ctx.fetch("/health"); }, hooks: {} },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(actualUrl, "http://daemon.local:8080/health");
+      assert.equal(actualAuth, "Bearer setup-token");
+    });
+
+    it("setup context fetch passes absolute URL through unchanged", async () => {
+      let actualUrl = "";
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "setup-token", clientName: "test-transformer", httpUrl: "http://daemon.local:8080", fetchFn: async (url, init) => { actualUrl = url; return new Response(JSON.stringify({ ok: true })); },
+        definition: { setup(ctx) { ctx.fetch("https://external.example.com/api"); }, hooks: {} },
+        client: fake,
+      });
+      bridge.start();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(actualUrl, "https://external.example.com/api");
+    });
+  });
+
+  describe("ctx.emitMessage", () => {
+    it("emits a message via hydra-acp/message/emit with route daemon", async () => {
+      const fake = new FakeTransformerClient();
+      let ctxForEmit: import("../src/types.js").Context | undefined;
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:open": async (_event, ctx) => {
+              ctxForEmit = ctx;
+              await ctx.emitMessage("Review session forked: hydra://sessions/abc123");
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.opened", sessionId: "emit-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.ok(ctxForEmit);
+      const emitCall = fake.requests.find((r) => r.method === "hydra-acp/message/emit");
+      assert.ok(emitCall);
+      const ep = emitCall!.params as Record<string, unknown> | undefined;
+      assert.equal(ep?.sessionId, "emit-sess");
+      assert.equal(ep?.method, "session/prompt");
+      assert.equal(ep?.route, "daemon");
+    });
+
+    it("emitMessage returns immediately even when RPC fails", async () => {
+      const fake = new FakeTransformerClient();
+      let ctxForEmit: import("../src/types.js").Context | undefined;
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:open": async (_event, ctx) => {
+              ctxForEmit = ctx;
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.opened", sessionId: "emit-fail-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      // Should resolve immediately without blocking
+      const start = Date.now();
+      await ctxForEmit!.emitMessage("test");
+      const elapsed = Date.now() - start;
+      assert.ok(elapsed < 500, "emitMessage should return quickly (took " + elapsed + "ms)");
+    });
+  });
 });

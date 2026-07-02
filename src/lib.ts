@@ -32,6 +32,10 @@ import type {
   ApproveReturn,
   HandledReturn,
   HookReturn,
+  CommandSpec,
+  CommandInvocation,
+  CommandResult,
+  CommandHandler,
 } from "./types.js";
 
 // ── Event payload lookup (avoids a gnarly mapped-type across 25 hooks) ──
@@ -88,7 +92,7 @@ export interface TransformerSpec {
 const BRAND_KEY = "__hydraAcpTransformer";
 const BRAND_VALUE = "TransformerDefinition";
 
-interface TransformerDefinition {
+export interface TransformerDefinition extends TransformerSpec {
   readonly [BRAND_KEY]: typeof BRAND_VALUE;
 }
 
@@ -172,4 +176,8 @@ export type {
   AgentSwapPayload,
   CompactionPayload,
   AgentCapabilities,
+  CommandSpec,
+  CommandInvocation,
+  CommandResult,
+  CommandHandler,
 };
