@@ -454,6 +454,127 @@ describe("TransformerBridge - protocol fidelity", () => {
     });
   });
 
+  describe("ctx.extensionState", () => {
+    it("set() sends hydra-acp/session/extension_state/set with the current sessionId + key + value", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:open": async (_event, ctx) => {
+              await ctx.extensionState.set("activated", true);
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.opened", sessionId: "ext-set-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      const call = fake.requests.find(
+        (r) => r.method === "hydra-acp/session/extension_state/set",
+      );
+      assert.ok(call, "expected extension_state/set request");
+      assert.deepEqual(call!.params, {
+        sessionId: "ext-set-sess",
+        key: "activated",
+        value: true,
+      });
+    });
+
+    it("get() returns the value the daemon reports", async () => {
+      const fake = new FakeTransformerClient();
+      // Intercept get to return a specific value; other methods default.
+      const originalRequest = fake.request.bind(fake);
+      (fake as unknown as { request: BridgeClient["request"] }).request = ((method: string, params?: unknown) => {
+        if (method === "hydra-acp/session/extension_state/get") {
+          fake.requests.push({ method, params });
+          return Promise.resolve({ value: 42 });
+        }
+        return originalRequest(method, params);
+      }) as BridgeClient["request"];
+      let observedValue: unknown;
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:open": async (_event, ctx) => {
+              observedValue = await ctx.extensionState.get("count");
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.opened", sessionId: "ext-get-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(observedValue, 42);
+      const call = fake.requests.find(
+        (r) => r.method === "hydra-acp/session/extension_state/get",
+      );
+      assert.deepEqual(call!.params, { sessionId: "ext-get-sess", key: "count" });
+    });
+
+    it("list() returns the bucket the daemon reports", async () => {
+      const fake = new FakeTransformerClient();
+      const originalRequest = fake.request.bind(fake);
+      (fake as unknown as { request: BridgeClient["request"] }).request = ((method: string, params?: unknown) => {
+        if (method === "hydra-acp/session/extension_state/list") {
+          fake.requests.push({ method, params });
+          return Promise.resolve({ state: { activated: true, runs: 3 } });
+        }
+        return originalRequest(method, params);
+      }) as BridgeClient["request"];
+      let observed: Record<string, unknown> | undefined;
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:open": async (_event, ctx) => {
+              observed = await ctx.extensionState.list();
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.opened", sessionId: "ext-list-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(observed, { activated: true, runs: 3 });
+    });
+
+    it("delete() sends hydra-acp/session/extension_state/delete with key + sessionId", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:open": async (_event, ctx) => {
+              await ctx.extensionState.delete("stale");
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.opened", sessionId: "ext-del-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      const call = fake.requests.find(
+        (r) => r.method === "hydra-acp/session/extension_state/delete",
+      );
+      assert.ok(call, "expected extension_state/delete request");
+      assert.deepEqual(call!.params, { sessionId: "ext-del-sess", key: "stale" });
+    });
+  });
+
   describe("ctx.rpc", () => {
     it("rpc() delegates to client.request and returns the result", async () => {
       const fake = new FakeTransformerClient();

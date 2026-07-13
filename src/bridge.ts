@@ -142,6 +142,34 @@ function createContext(
         }
         return (options.fetchFn ?? globalThis.fetch)(url, { ...init, headers });
       },
+      extensionState: {
+        async get(key: string): Promise<unknown> {
+          const res = (await options.rpc?.(
+            "hydra-acp/session/extension_state/get",
+            { sessionId, key },
+          )) as { value?: unknown } | undefined;
+          return res?.value ?? undefined;
+        },
+        async list(): Promise<Record<string, unknown>> {
+          const res = (await options.rpc?.(
+            "hydra-acp/session/extension_state/list",
+            { sessionId },
+          )) as { state?: Record<string, unknown> } | undefined;
+          return res?.state ?? {};
+        },
+        async set(key: string, value: unknown): Promise<void> {
+          await options.rpc?.(
+            "hydra-acp/session/extension_state/set",
+            { sessionId, key, value },
+          );
+        },
+        async delete(key: string): Promise<void> {
+          await options.rpc?.(
+            "hydra-acp/session/extension_state/delete",
+            { sessionId, key },
+          );
+        },
+      },
     },
   };
 }

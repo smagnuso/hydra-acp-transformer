@@ -271,17 +271,46 @@ export interface Context {
     *  Errors are suppressed — this is fire-and-forget; callers should
     *  also surface critical info via the command return value. */
    emitMessage(text: string): Promise<void>;
-   /** Fetch against the hydra daemon. If pathOrUrl starts with "/" the
+    /** Fetch against the hydra daemon. If pathOrUrl starts with "/" the
     *  daemon base URL is prepended. The Authorization: Bearer <token>
     *  header is injected unless the caller sets one in init.headers.
     *  Non-2xx responses are NOT thrown — caller decides. */
-   fetch(pathOrUrl: string, init?: RequestInit): Promise<Response>;
- }
+    fetch(pathOrUrl: string, init?: RequestInit): Promise<Response>;
+    /** Per-session, per-extension durable key-value store. Persisted to
+    *  the session's meta.json by the daemon; survives daemon and
+    *  transformer restarts, follows the session across cold/warm
+    *  cycles. Reset to empty on user-visible session forks; preserved
+    *  across compaction swaps.
+    *
+    *  Namespaced by the calling extension: the daemon derives the
+    *  extension name from the connection's identity, so extensions
+    *  can only read/write their own keys — no way to touch another
+    *  extension's state, no way to spoof.
+    *
+    *  Use for small pieces of durable per-session state: activation
+    *  flags, policy decisions, spend carryover, last-seen markers,
+    *  etc. Total per-extension bucket is capped at 64KB; a set() that
+    *  would exceed the cap rejects with an actionable error.
+    */
+    extensionState: ExtensionStateApi;
+  }
 
 /** Context available during setup (before any session is known). */
-export interface SetupContext extends Omit<Context, "sessionId" | "cwd"> {
+export interface SetupContext extends Omit<Context, "sessionId" | "cwd" | "extensionState"> {
   sessionId: undefined;
   cwd: undefined;
+}
+
+/** Per-session, per-extension durable key-value store. See Context.extensionState. */
+export interface ExtensionStateApi {
+  /** Read one key. Resolves to undefined when the key isn't set. */
+  get(key: string): Promise<unknown>;
+  /** Read the caller extension's full bucket for this session. */
+  list(): Promise<Record<string, unknown>>;
+  /** Write one key. Rejects on size-cap violations (64KB per bucket). */
+  set(key: string, value: unknown): Promise<void>;
+  /** Remove one key. No-op when the key or bucket doesn't exist. */
+  delete(key: string): Promise<void>;
 }
 
 // ── Return-value shapes ───────────────────────────────────────────────
