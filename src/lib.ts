@@ -42,6 +42,7 @@ import type {
 // ── Event payload lookup (avoids a gnarly mapped-type across 25 hooks) ──
 
 interface TransformerEvents {
+  "session:starting": SessionIdlePayload;
   "session:open": SessionIdlePayload;
   "session:close": SessionIdlePayload;
   "session:idle": SessionIdlePayload;

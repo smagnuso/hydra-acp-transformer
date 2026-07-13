@@ -170,6 +170,14 @@ function createContext(
           );
         },
       },
+      async attach(): Promise<void> {
+        await options.rpc?.("hydra-acp/transformer/attach", { sessionId });
+      },
+      async refreshMcpTools(): Promise<void> {
+        await options.rpc?.("hydra-acp/mcp_tools/refresh_session", {
+          sessionId,
+        });
+      },
     },
   };
 }
@@ -532,6 +540,7 @@ export class TransformerBridge extends EventEmitter {
 
     // Map daemon lifecycle event names to SDK hook names.
     const lifecycleMap = new Map<string, HookName>([
+      ["session.starting", "session:starting"],
       ["session.opened", "session:open"],
       ["session.closed", "session:close"],
       ["session.idle", "session:idle"],

@@ -161,7 +161,7 @@ export interface AuthEnvelope {
 
 // ── Lifecycle event payloads ──────────────────────────────────────────
 
-/** session:open, session:close, session:idle — all fire empty payloads. */
+/** session:starting, session:open, session:close, session:idle — all fire empty payloads. */
 export type SessionIdlePayload = {};
 
 /** lifecycle:permission.replied */
@@ -293,10 +293,49 @@ export interface Context {
     *  would exceed the cap rejects with an actionable error.
     */
     extensionState: ExtensionStateApi;
+    /** Join this session's transformer chain, so subsequent message
+    *  intercepts and lifecycle events flow to this transformer.
+    *  Idempotent on the daemon side — safe to call repeatedly.
+    *
+    *  Typical use is inside a `session:starting` handler for opt-in
+    *  transformers that persist their own activation signal:
+    *
+    *    "session:starting": async (_event, ctx) => {
+    *      const activated = await ctx.extensionState.get("activated");
+    *      if (!activated) return;
+    *      await ctx.attach();
+    *      await ctx.refreshMcpTools();
+    *    }
+    *
+    *  Wraps `hydra-acp/transformer/attach`. Prefer this over `ctx.rpc`
+    *  when the intent is "join this session's chain."
+    */
+    attach(): Promise<void>;
+    /** Ask the daemon to push a `notifications/tools/list_changed` to
+    *  this session's MCP client, so it re-fetches its tool list against
+    *  the current dynamic-tools state.
+    *
+    *  Useful when the transformer's per-session tool visibility just
+    *  changed (activation flag flipped, feature gate opened, etc.) —
+    *  the client's cached catalog may otherwise stay stale until the
+    *  next session cold/warm cycle. Also the canonical way to close
+    *  the "resurrect race" for opt-in transformers: the client's
+    *  initial `tools/list` during agent bootstrap may race the token
+    *  bind and receive the static register-time spec; calling this
+    *  from `session:starting` forces a re-list once the session is
+    *  bound.
+    *
+    *  No-op on the daemon side when no matching transport exists.
+    *  Wraps `hydra-acp/mcp_tools/refresh_session`.
+    */
+    refreshMcpTools(): Promise<void>;
   }
 
 /** Context available during setup (before any session is known). */
-export interface SetupContext extends Omit<Context, "sessionId" | "cwd" | "extensionState"> {
+export interface SetupContext extends Omit<
+  Context,
+  "sessionId" | "cwd" | "extensionState" | "attach" | "refreshMcpTools"
+> {
   sessionId: undefined;
   cwd: undefined;
 }

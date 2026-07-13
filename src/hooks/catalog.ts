@@ -10,6 +10,24 @@ import {
 } from "./filter.js";
 
 export const HOOK_CATALOG = {
+  // Out-of-chain "session is coming to life" broadcast. Fires on
+  // session/new AND resurrect from cold, once per session bring-up,
+  // BEFORE the agent produces events. The daemon dispatches to every
+  // subscribed transformer regardless of chain membership — so this
+  // is the correct hook for opt-in-per-session patterns (e.g. "if I
+  // have persisted state for this session, join its chain").
+  //
+  // Typical handler shape:
+  //   async (_event, ctx) => {
+  //     const activated = await ctx.extensionState.get("activated");
+  //     if (!activated) return;
+  //     await ctx.attach();          // join the chain going forward
+  //     await ctx.refreshMcpTools(); // close the resurrect race
+  //   }
+  //
+  // Fires BEFORE `session:open` (which is chain-scoped and only
+  // reaches transformers already attached).
+  "session:starting": { intercept: "lifecycle:session.starting" },
   "session:open": { intercept: "lifecycle:session.opened" },
   "session:close": { intercept: "lifecycle:session.closed" },
   "session:idle": { intercept: "lifecycle:session.idle" },

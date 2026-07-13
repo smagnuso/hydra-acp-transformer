@@ -286,6 +286,31 @@ describe("TransformerBridge - protocol fidelity", () => {
       assert.equal(hookCalled, false);
     });
 
+    it("dispatches session:starting when the daemon fires lifecycle:session.starting", async () => {
+      const fake = new FakeTransformerClient();
+      let openCalled = false;
+      let receivedSessionId: string | undefined;
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:starting": async (_event, ctx) => {
+              openCalled = true;
+              receivedSessionId = ctx.sessionId;
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.starting", sessionId: "sess-starting", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(openCalled, true, "session:starting hook should have fired");
+      assert.equal(receivedSessionId, "sess-starting");
+    });
+
     it("does not dispatch when hook is not registered for a known lifecycle event", async () => {
       const fake = new FakeTransformerClient();
       let toolPostCalled = false;
@@ -547,6 +572,56 @@ describe("TransformerBridge - protocol fidelity", () => {
       });
       await new Promise((r) => setTimeout(r, 20));
       assert.deepEqual(observed, { activated: true, runs: 3 });
+    });
+
+    it("ctx.attach() sends hydra-acp/transformer/attach with the current sessionId", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:starting": async (_event, ctx) => {
+              await ctx.attach();
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.starting", sessionId: "ext-attach-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      const call = fake.requests.find(
+        (r) => r.method === "hydra-acp/transformer/attach",
+      );
+      assert.ok(call, "expected transformer/attach request");
+      assert.deepEqual(call!.params, { sessionId: "ext-attach-sess" });
+    });
+
+    it("ctx.refreshMcpTools() sends hydra-acp/mcp_tools/refresh_session with the current sessionId", async () => {
+      const fake = new FakeTransformerClient();
+      const bridge = new TransformerBridge({
+        daemonWsUrl: "ws://localhost:55514/acp", token: "test-token", clientName: "test-transformer",
+        definition: {
+          hooks: {
+            "session:starting": async (_event, ctx) => {
+              await ctx.refreshMcpTools();
+            },
+          },
+        },
+        client: fake,
+      });
+      emitNotification(fake, bridge, {
+        jsonrpc: "2.0", method: "hydra-acp/transformer/session_event",
+        params: { event: "session.starting", sessionId: "ext-refresh-sess", payload: {} },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      const call = fake.requests.find(
+        (r) => r.method === "hydra-acp/mcp_tools/refresh_session",
+      );
+      assert.ok(call, "expected mcp_tools/refresh_session request");
+      assert.deepEqual(call!.params, { sessionId: "ext-refresh-sess" });
     });
 
     it("delete() sends hydra-acp/session/extension_state/delete with key + sessionId", async () => {
