@@ -1,7 +1,7 @@
 {
   "name": "@hydra-acp/transformer",
   "version": "0.0.5",
-  "description": "JS-injected hooks for hydra-acp — drop a .config.js file or build a custom transformer with the SDK.",
+  "description": "JS-injected hooks for hydra-acp \u2014 drop a .config.js file or build a custom transformer with the SDK.",
   "license": "MIT",
   "type": "module",
   "publishConfig": {
@@ -32,7 +32,7 @@
     "watch": "tsup --watch",
     "start": "node dist/index.js",
     "dev": "tsup && node dist/index.js",
-    "test": "node --test --import tsx 'test/**/*.test.ts'",
+    "test": "node scripts/run-tests.mjs",
     "lint": "tsc -p . --noEmit",
     "prepublishOnly": "npm run build && npm test"
   },
